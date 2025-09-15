@@ -36,8 +36,18 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# Set global deterministic behavior for reproducibility
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 def run_original_experiment(vector_len, num_vectors, num_steps=5000):
     """Run with original broken logic: while vector_len < num_vectors"""
+    
+    # Set deterministic seeds for reproducible results (config-specific)
+    config_seed = 42 + hash((vector_len, num_vectors)) % 1000
+    torch.manual_seed(config_seed)
+    torch.cuda.manual_seed_all(config_seed)
+    np.random.seed(config_seed)
     
     # Original calculation with int() truncation
     loss_exp = min(int(60 / torch.log(torch.tensor(vector_len, dtype=torch.float32))), 20)
@@ -108,6 +118,12 @@ def run_original_experiment(vector_len, num_vectors, num_steps=5000):
 
 def run_fixed_experiment(vector_len, num_vectors, num_steps=5000):
     """Run with fixed logic: while step_now < num_steps"""
+    
+    # Set deterministic seeds for reproducible results (config-specific)
+    config_seed = 42 + hash((vector_len, num_vectors)) % 1000
+    torch.manual_seed(config_seed)
+    torch.cuda.manual_seed_all(config_seed)
+    np.random.seed(config_seed)
     
     # Fixed calculation without int() truncation
     loss_exp = min(60 / torch.log(torch.tensor(vector_len, dtype=torch.float32)), 20.0)
