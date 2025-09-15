@@ -20,7 +20,7 @@ num_steps = 50000
 for vector_len in [2, 3, 4, 7, 10, 30, 100, 300, 1000, 3000, 10000]:
     for num_vectors in [10, 30, 100, 300, 1000, 3000, 10000, 20000, 30000]:
 
-        loss_exp = min(60 / torch.log(torch.tensor(vector_len, dtype=torch.float32)), 20.0)
+        loss_exp = min(int(60 / torch.log(torch.tensor(vector_len, dtype=torch.float32))), 20)
         step_now = 0
 
         # Create and normalize big_matrix on GPU
@@ -34,7 +34,7 @@ for vector_len in [2, 3, 4, 7, 10, 30, 100, 300, 1000, 3000, 10000]:
         c = 10  # Initial value for c
 
 
-        while step_now < num_steps:
+        while vector_len < num_vectors:
             optimizer.zero_grad()
 
             # Normalize big_matrix rows
