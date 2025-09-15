@@ -16,7 +16,7 @@ This script will try to import functions from the uploaded files:
 
 If they exist, some functions will be used. Otherwise, internal fallbacks are used.
 
-Author: generated for user by ChatGPT
+Comprehensive experimental framework for Johnson-Lindenstrauss research
 """
 
 import argparse
@@ -142,7 +142,7 @@ def evaluate_pairwise_stats(X, pairs=None, eval_pairs=100000, device='cuda'):
 # ------------------ Loss functions for vector optimization (mode A/C) ------------------
 
 def loss_exp_penalty(dots, alpha=20.0):
-    # Yoder style: exp(alpha * dot^2). Use clamping for numerical safety.
+    # Exponential penalty: exp(alpha * dot^2). Use clamping for numerical safety.
     # dots in [-1,1]
     val = (alpha * (dots ** 2)).clamp(max=50.0)  # avoid huge exponent
     return torch.exp(val).sum()

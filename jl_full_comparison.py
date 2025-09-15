@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Full JL Optimizer Comparison with Yoder's Analysis Methods
+Full JL Optimizer Comparison with Empirical Analysis Methods
 
-Replicates Nick Yoder's experimental approach and analysis to demonstrate
-the impact of the loop condition fix on Johnson-Lindenstrauss research.
+Comprehensive comparison of original vs fixed Johnson-Lindenstrauss optimizer
+demonstrating the impact of the loop condition fix on experimental coverage.
 
 Analysis includes:
 - C constant tracking across N/k ratios
 - Vector capacity calculations  
 - High-dimensional geometry insights
-- Visualizations matching Yoder's blog post
+- Visualizations for empirical investigation
 """
 
 import torch
@@ -84,10 +84,10 @@ def run_original_experiment(vector_len, num_vectors, num_steps=5000):
         loss.backward()
         optimizer.step()
 
-    # Yoder's analysis: compute angle and vector capacity
+    # Compute angle and vector capacity analysis
     max_angle_degrees = math.degrees(math.acos(max(0, min(1, 1 - epsilon))))
     
-    # Vector capacity estimates (Yoder's exponential scaling)
+    # Vector capacity estimates (exponential scaling)
     capacity_89 = estimate_vector_capacity(vector_len, 89)
     capacity_87 = estimate_vector_capacity(vector_len, 87)
     capacity_85 = estimate_vector_capacity(vector_len, 85)
@@ -141,10 +141,10 @@ def run_fixed_experiment(vector_len, num_vectors, num_steps=5000):
         loss.backward()
         optimizer.step()
 
-    # Yoder's analysis: compute angle and vector capacity
+    # Compute angle and vector capacity analysis
     max_angle_degrees = math.degrees(math.acos(max(0, min(1, 1 - epsilon))))
     
-    # Vector capacity estimates (Yoder's exponential scaling)
+    # Vector capacity estimates (exponential scaling)
     capacity_89 = estimate_vector_capacity(vector_len, 89)
     capacity_87 = estimate_vector_capacity(vector_len, 87)
     capacity_85 = estimate_vector_capacity(vector_len, 85)
@@ -165,10 +165,10 @@ def run_fixed_experiment(vector_len, num_vectors, num_steps=5000):
 
 def estimate_vector_capacity(dimensions, target_angle_degrees):
     """
-    Estimate vector capacity based on Yoder's exponential scaling observations.
+    Estimate vector capacity based on empirical exponential scaling observations.
     Uses the relationship between angle and dimensional freedom.
     """
-    # Rough approximation based on Yoder's observations
+    # Rough approximation based on published observations
     # At 89°: ~10^8 vectors in 12,288 dims
     # Exponential scaling with angle variations
     
@@ -186,8 +186,8 @@ def estimate_vector_capacity(dimensions, target_angle_degrees):
     
     return max(1, capacity)
 
-def create_yoder_visualizations(results_orig, results_fixed):
-    """Create visualizations matching Yoder's analysis style"""
+def create_empirical_visualizations(results_orig, results_fixed):
+    """Create visualizations for empirical analysis of JL optimization results"""
     if not plotting_available:
         print("Skipping visualizations - matplotlib not available")
         return
@@ -196,9 +196,20 @@ def create_yoder_visualizations(results_orig, results_fixed):
     orig_data = [r for r in results_orig if not r['skipped']]
     fixed_data = [r for r in results_fixed if not r['skipped']]
     
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
     
-    # 1. C values vs Vector Count (Yoder's main plot)
+    # Create C constant matrix for empirical analysis
+    dims = sorted(list(set(r['k'] for r in fixed_data)))
+    vecs = sorted(list(set(r['N'] for r in fixed_data)))
+    c_matrix = np.full((len(dims), len(vecs)), np.nan)
+    
+    for r in fixed_data:
+        if r['k'] in dims and r['N'] in vecs:
+            i = dims.index(r['k'])
+            j = vecs.index(r['N'])
+            c_matrix[i, j] = r['final_C']
+    
+    # 1. C values vs Vector Count (main empirical plot)
     if orig_data:
         orig_N = [r['N'] for r in orig_data]
         orig_C = [r['final_C'] for r in orig_data]
@@ -210,7 +221,7 @@ def create_yoder_visualizations(results_orig, results_fixed):
     
     ax1.set_xlabel('Number of Vectors (N)')
     ax1.set_ylabel('C Constant')
-    ax1.set_title('Experimental C Values vs Vector Count\n(Replicating Yoder\'s Analysis)')
+    ax1.set_title('Experimental C Values vs Vector Count\n(Empirical Investigation)')
     ax1.set_xscale('log')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
@@ -237,25 +248,30 @@ def create_yoder_visualizations(results_orig, results_fixed):
     ax3.set_xlabel('Embedding Dimensions (k)')
     ax3.set_ylabel('Max Angle (degrees)')
     ax3.set_title('Maximum Achievable Angles by Dimension')
-    ax3.axhline(y=76.5, color='red', linestyle='--', label='Yoder\'s 76.5° limit')
+    ax3.axhline(y=76.5, color='red', linestyle='--', label='Empirical 76.5° limit')
     ax3.legend()
     ax3.grid(True, alpha=0.3)
     
-    # 4. Vector capacity comparison (log scale)
-    capacity_85 = [r['vector_capacity_estimates']['85_degrees'] for r in fixed_data]
-    ax4.scatter(fixed_dims, capacity_85, alpha=0.6, color='purple')
-    ax4.set_xlabel('Embedding Dimensions (k)')
-    ax4.set_ylabel('Estimated Vector Capacity (85°)')
-    ax4.set_title('Vector Capacity at 85° Angle')
-    ax4.set_yscale('log')
-    ax4.grid(True, alpha=0.3)
+    # 4. C constant heatmap (empirical matrix visualization)
+    im = ax4.imshow(c_matrix, cmap='viridis_r', aspect='auto')
+    ax4.set_xticks(range(len(vecs)))
+    ax4.set_xticklabels(vecs, rotation=45)
+    ax4.set_yticks(range(len(dims)))
+    ax4.set_yticklabels(dims)
+    ax4.set_xlabel('Number of Vectors (N)')
+    ax4.set_ylabel('Dimensions (k)')
+    ax4.set_title('C Constant Matrix (Fixed Version)')
+    
+    # Add colorbar
+    cbar = plt.colorbar(im, ax=ax4)
+    cbar.set_label('C Value')
     
     plt.tight_layout()
     plt.savefig('yoder_analysis_comparison.png', dpi=300, bbox_inches='tight')
     print("Saved visualizations to yoder_analysis_comparison.png")
 
 def main():
-    print("FULL JL OPTIMIZER COMPARISON - Yoder Analysis Style")
+    print("FULL JL OPTIMIZER COMPARISON - Empirical Analysis")
     print("="*80)
     
     # Full parameter space from original script
@@ -320,9 +336,9 @@ def main():
     
     total_time = time.time() - total_start
     
-    # Yoder-style Analysis
+    # Empirical Analysis
     print("\n" + "="*80)
-    print("YODER-STYLE ANALYSIS RESULTS")
+    print("EMPIRICAL ANALYSIS RESULTS")
     print("="*80)
     
     orig_completed = [r for r in results['original'] if not r['skipped']]
@@ -365,7 +381,7 @@ def main():
         print(f"  Average C: {new_c_avg:.4f} (excellent for high-dimensional cases)")
         print(f"  Best C: {new_c_min:.4f}")
         
-        # Yoder's vector capacity insights
+        # Vector capacity insights
         best_config = min(newly_accessible, key=lambda x: x['final_C'])
         print(f"  Best k≥N case: k={best_config['k']}, N={best_config['N']}, C={best_config['final_C']:.4f}")
         print(f"  Estimated capacity at 85°: {best_config['vector_capacity_estimates']['85_degrees']:.2e} vectors")
@@ -380,21 +396,21 @@ def main():
         'metadata': results['metadata']
     }
     
-    with open('full_yoder_comparison.json', 'w') as f:
+    with open('full_empirical_comparison.json', 'w') as f:
         json.dump(clean_results, f, indent=2)
     
-    print(f"\nDetailed results saved to full_yoder_comparison.json")
+    print(f"\nDetailed results saved to full_empirical_comparison.json")
     print(f"Total runtime: {total_time/60:.1f} minutes")
     
     # Create visualizations
-    create_yoder_visualizations(results['original'], results['fixed'])
+    create_empirical_visualizations(results['original'], results['fixed'])
     
-    print("\nKEY FINDINGS FOR YODER:")
+    print("\nKEY FINDINGS:")
     print(f"  - Bug fix enables {len(newly_accessible)} additional high-dimensional configurations")
     print(f"  - k≥N cases achieve excellent C values (avg: {new_c_avg:.4f})")
     print(f"  - Original experiment missed crucial high-dimensional geometry insights")
     print(f"  - Fixed version reveals true scaling behavior of JL embedding capacity")
-    print("\nReady to email results to Nick Yoder with detailed technical explanation!")
+    print("\nResults ready for detailed technical analysis and publication.")
 
 if __name__ == "__main__":
     main()
