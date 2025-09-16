@@ -20,6 +20,8 @@ import json
 import math
 import numpy as np
 from pathlib import Path
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # Optional plotting (install if needed: pip install matplotlib seaborn)
 try:
@@ -62,6 +64,9 @@ def run_original_experiment(vector_len, num_vectors, num_steps=5000):
     big_id = torch.eye(num_vectors, device=device, dtype=torch.float32)
     c = 10
 
+    # Early stopping tracking
+    loss_history = []
+
     # ORIGINAL BROKEN CONDITION
     if vector_len >= num_vectors:
         return {
@@ -83,6 +88,16 @@ def run_original_experiment(vector_len, num_vectors, num_steps=5000):
 
         diff = dot_products - big_id
         loss = (diff.abs()**loss_exp).sum()
+
+        # Early stopping: check for convergence
+        if step_now > 100:  # Give it time to settle
+            loss_history.append(loss.item())
+            if len(loss_history) > 20:  # Keep last 20 values
+                loss_history.pop(0)
+                # Check if loss plateaued (relative change < 0.1%)
+                loss_range = max(loss_history) - min(loss_history)
+                if loss_range / max(loss_history) < 0.001:
+                    break  # Converged early
 
         epsilon = diff.max().item()
         c = min(vector_len / math.log(num_vectors) * epsilon**2, c)
@@ -137,6 +152,9 @@ def run_fixed_experiment(vector_len, num_vectors, num_steps=5000):
     big_id = torch.eye(num_vectors, device=device, dtype=torch.float32)
     c = 10
 
+    # Early stopping tracking
+    loss_history = []
+
     # FIXED CONDITION
     while step_now < num_steps:
         optimizer.zero_grad()
@@ -146,6 +164,16 @@ def run_fixed_experiment(vector_len, num_vectors, num_steps=5000):
 
         diff = dot_products - big_id
         loss = (diff.abs()**loss_exp).sum()
+
+        # Early stopping: check for convergence
+        if step_now > 100:  # Give it time to settle
+            loss_history.append(loss.item())
+            if len(loss_history) > 20:  # Keep last 20 values
+                loss_history.pop(0)
+                # Check if loss plateaued (relative change < 0.1%)
+                loss_range = max(loss_history) - min(loss_history)
+                if loss_range / max(loss_history) < 0.001:
+                    break  # Converged early
 
         epsilon = diff.max().item()
         c = min(vector_len / math.log(num_vectors) * epsilon**2, c)
@@ -286,6 +314,29 @@ def create_empirical_visualizations(results_orig, results_fixed):
     plt.savefig('yoder_analysis_comparison.png', dpi=300, bbox_inches='tight')
     print("Saved visualizations to yoder_analysis_comparison.png")
 
+def run_single_configuration(vector_len, num_vectors, num_steps=5000):
+    """Run both original and fixed experiments for a single configuration"""
+    # Run original version
+    start_time = time.time()
+    orig_result = run_original_experiment(vector_len, num_vectors, num_steps)
+    orig_time = time.time() - start_time
+    orig_result['runtime'] = orig_time
+    orig_result['k'] = vector_len
+    orig_result['N'] = num_vectors
+
+    # Run fixed version
+    start_time = time.time()
+    fixed_result = run_fixed_experiment(vector_len, num_vectors, num_steps)
+    fixed_time = time.time() - start_time
+    fixed_result['runtime'] = fixed_time
+    fixed_result['k'] = vector_len
+    fixed_result['N'] = num_vectors
+
+    # Memory cleanup
+    torch.cuda.empty_cache()
+
+    return orig_result, fixed_result
+
 def main():
     print("FULL JL OPTIMIZER COMPARISON - Empirical Analysis")
     print("="*80)
@@ -300,6 +351,14 @@ def main():
     print()
     
     num_steps = 5000  # Reduced from original 50000 for reasonable runtime
+
+    # Check for parallel processing argument
+    use_parallel = len(sys.argv) > 1 and sys.argv[1] == '--parallel'
+    num_workers = min(4, mp.cpu_count()) if use_parallel else 1
+
+    print(f"Running with {'parallel' if use_parallel else 'sequential'} processing")
+    if use_parallel:
+        print(f"Using {num_workers} workers")
     
     results = {
         'original': [],
@@ -315,35 +374,58 @@ def main():
     
     config_count = 0
     total_start = time.time()
-    
-    for vector_len in vector_lens:
-        for num_vectors in num_vectors_list:
+
+    # Create list of all configurations to run
+    configurations = [(vector_len, num_vectors, num_steps)
+                     for vector_len in vector_lens
+                     for num_vectors in num_vectors_list]
+
+    if use_parallel:
+        # Parallel execution
+        print("Starting parallel execution...")
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all jobs
+            future_to_config = {
+                executor.submit(run_single_configuration, vl, nv, ns): (vl, nv)
+                for vl, nv, ns in configurations
+            }
+
+            # Process results as they complete
+            for future in as_completed(future_to_config):
+                config_count += 1
+                vector_len, num_vectors = future_to_config[future]
+                elapsed = time.time() - total_start
+                eta = (elapsed / config_count) * (total_configs - config_count) if config_count > 0 else 0
+
+                print(f"[{config_count:2d}/{total_configs}] k={vector_len:5d}, N={num_vectors:5d} | "
+                      f"ETA: {eta/60:.1f}m | {elapsed/60:.1f}m elapsed")
+
+                try:
+                    orig_result, fixed_result = future.result()
+                    results['original'].append(orig_result)
+                    results['fixed'].append(fixed_result)
+
+                    # Progress update
+                    if orig_result['skipped']:
+                        print(f"    Original: SKIPPED | Fixed: C={fixed_result['final_C']:.4f}")
+                    else:
+                        print(f"    Original: C={orig_result['final_C']:.4f} | Fixed: C={fixed_result['final_C']:.4f}")
+                except Exception as e:
+                    print(f"    ERROR: {e}")
+    else:
+        # Sequential execution (original logic)
+        for vector_len, num_vectors, _ in configurations:
             config_count += 1
             elapsed = time.time() - total_start
             eta = (elapsed / config_count) * (total_configs - config_count) if config_count > 0 else 0
-            
+
             print(f"[{config_count:2d}/{total_configs}] k={vector_len:5d}, N={num_vectors:5d} | "
                   f"ETA: {eta/60:.1f}m | {elapsed/60:.1f}m elapsed")
-            
-            # Run original version
-            start_time = time.time()
-            orig_result = run_original_experiment(vector_len, num_vectors, num_steps)
-            orig_time = time.time() - start_time
-            orig_result['runtime'] = orig_time
-            orig_result['k'] = vector_len
-            orig_result['N'] = num_vectors
-            
-            # Run fixed version  
-            start_time = time.time()
-            fixed_result = run_fixed_experiment(vector_len, num_vectors, num_steps)
-            fixed_time = time.time() - start_time
-            fixed_result['runtime'] = fixed_time
-            fixed_result['k'] = vector_len
-            fixed_result['N'] = num_vectors
-            
+
+            orig_result, fixed_result = run_single_configuration(vector_len, num_vectors, num_steps)
             results['original'].append(orig_result)
             results['fixed'].append(fixed_result)
-            
+
             # Progress update
             if orig_result['skipped']:
                 print(f"    Original: SKIPPED | Fixed: C={fixed_result['final_C']:.4f}")
