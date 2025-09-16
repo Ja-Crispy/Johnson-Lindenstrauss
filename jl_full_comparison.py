@@ -23,6 +23,7 @@ from pathlib import Path
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+
 # Optional plotting (install if needed: pip install matplotlib seaborn)
 try:
     import matplotlib.pyplot as plt
@@ -456,16 +457,22 @@ def main():
     else:
         orig_c_avg = orig_c_min = None
     
-    fixed_c_values = [r['final_C'] for r in fixed_completed]
-    fixed_c_avg = sum(fixed_c_values) / len(fixed_c_values)
-    fixed_c_min = min(fixed_c_values)
+    fixed_c_values = [r['final_C'] for r in fixed_completed if r['final_C'] is not None]
+    if fixed_c_values:
+        fixed_c_avg = sum(fixed_c_values) / len(fixed_c_values)
+        fixed_c_min = min(fixed_c_values)
+    else:
+        fixed_c_avg = fixed_c_min = None
     
     print(f"\nC Constant Analysis (Lower = Better):")
     if orig_c_avg:
         print(f"  Original: avg={orig_c_avg:.4f}, min={orig_c_min:.4f}")
     else:
         print(f"  Original: insufficient data (most configs skipped)")
-    print(f"  Fixed:    avg={fixed_c_avg:.4f}, min={fixed_c_min:.4f}")
+    if fixed_c_avg:
+        print(f"  Fixed:    avg={fixed_c_avg:.4f}, min={fixed_c_min:.4f}")
+    else:
+        print(f"  Fixed:    insufficient data (no configs completed)")
     
     # High-dimensional analysis (k≥N cases that were previously broken)
     newly_accessible = [r for r in fixed_completed if r['k'] >= r['N']]
@@ -505,10 +512,15 @@ def main():
     
     print("\nKEY FINDINGS:")
     print(f"  - Bug fix enables {len(newly_accessible)} additional high-dimensional configurations")
-    print(f"  - k≥N cases achieve excellent C values (avg: {new_c_avg:.4f})")
+    if newly_accessible:
+        new_c_values = [r['final_C'] for r in newly_accessible]
+        new_c_avg = sum(new_c_values) / len(new_c_values)
+        print(f"  - k≥N cases achieve excellent C values (avg: {new_c_avg:.4f})")
     print(f"  - Original experiment missed crucial high-dimensional geometry insights")
     print(f"  - Fixed version reveals true scaling behavior of JL embedding capacity")
     print("\nResults ready for detailed technical analysis and publication.")
 
 if __name__ == "__main__":
+    # Set multiprocessing start method for CUDA compatibility
+    mp.set_start_method('spawn', force=True)
     main()
