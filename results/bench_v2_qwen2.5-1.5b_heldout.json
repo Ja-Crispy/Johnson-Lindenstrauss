@@ -1,0 +1,132 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B",
+  "split": "heldout",
+  "seq_len": 512,
+  "n_seqs": 20,
+  "sampled_layers": [
+    0,
+    6,
+    13,
+    20,
+    27
+  ],
+  "n_kv_heads": 2,
+  "head_dim": 128,
+  "n_probe": 8,
+  "calib_summary": {
+    "d_eff_uc_mean": 3.4218382826272915,
+    "d_eff_uc_median": 3.3656350732303206,
+    "d_eff_centered_mean": 33.27845991427687,
+    "d_eff_centered_median": 32.26532078723572
+  },
+  "results": [
+    {
+      "config": "T-3.0",
+      "avg_bits": 3.0,
+      "cos_mean": 0.9727947545051575,
+      "cos_std": 0.05411524282703516,
+      "max_err_mean": 0.009041525041684508,
+      "n_samples": 100
+    },
+    {
+      "config": "S-3.0",
+      "avg_bits": 3.0,
+      "cos_mean": 0.9995958435535431,
+      "cos_std": 0.00017531559019245694,
+      "max_err_mean": 0.0010651631886139511,
+      "n_samples": 100,
+      "bits_alloc": {
+        "b_high": 4,
+        "b_low": 3,
+        "d_sem_sample": 1
+      }
+    },
+    {
+      "config": "O-3.0",
+      "avg_bits": 3.0,
+      "cos_mean": 0.9996159362792969,
+      "cos_std": 0.00012739319300563272,
+      "max_err_mean": 0.0010506910039111972,
+      "n_samples": 100,
+      "bits_alloc": {
+        "b_high": 3,
+        "b_med": 3,
+        "b_low": 3,
+        "d_sig_sample": 1,
+        "d_med_end_sample": 33
+      }
+    },
+    {
+      "config": "T-2.5",
+      "avg_bits": 2.5,
+      "cos_mean": 0.9682692605257034,
+      "cos_std": 0.05879923999836008,
+      "max_err_mean": 0.014152273521758615,
+      "n_samples": 100
+    },
+    {
+      "config": "S-2.5",
+      "avg_bits": 2.5,
+      "cos_mean": 0.997960531115532,
+      "cos_std": 0.0008292704880940822,
+      "max_err_mean": 0.002462202925235033,
+      "n_samples": 100,
+      "bits_alloc": {
+        "b_high": 8,
+        "b_low": 2,
+        "d_sem_sample": 1
+      }
+    },
+    {
+      "config": "O-2.5",
+      "avg_bits": 2.5,
+      "cos_mean": 0.9976985132694245,
+      "cos_std": 0.0031634900866685167,
+      "max_err_mean": 0.0023882945626974104,
+      "n_samples": 100,
+      "bits_alloc": {
+        "b_high": 4,
+        "b_med": 4,
+        "b_low": 2,
+        "d_sig_sample": 1,
+        "d_med_end_sample": 33
+      }
+    },
+    {
+      "config": "T-2.0",
+      "avg_bits": 2.0,
+      "cos_mean": 0.9682692605257034,
+      "cos_std": 0.05879923999836008,
+      "max_err_mean": 0.014152273521758615,
+      "n_samples": 100
+    },
+    {
+      "config": "S-2.0",
+      "avg_bits": 2.0,
+      "cos_mean": 0.9979019314050674,
+      "cos_std": 0.0008136645234022613,
+      "max_err_mean": 0.0024871731200255456,
+      "n_samples": 100,
+      "bits_alloc": {
+        "b_high": 3,
+        "b_low": 2,
+        "d_sem_sample": 1
+      }
+    },
+    {
+      "config": "O-2.0",
+      "avg_bits": 2.0,
+      "cos_mean": 0.9979051673412322,
+      "cos_std": 0.0006927135532127645,
+      "max_err_mean": 0.002481790091842413,
+      "n_samples": 100,
+      "bits_alloc": {
+        "b_high": 2,
+        "b_med": 2,
+        "b_low": 2,
+        "d_sig_sample": 1,
+        "d_med_end_sample": 33
+      }
+    }
+  ]
+}
