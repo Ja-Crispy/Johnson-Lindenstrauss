@@ -15,42 +15,48 @@ def load(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def fig_persistence(d: dict, out_dir: Path) -> None:
+def fig_persistence(d: dict, out_dir: Path, suffix: str = "") -> None:
     """Two heatmaps side by side: uncentered and centered top-PC alignment."""
-    M_uc = np.array(d["persistence"]["uncentered_L2_L26_matrix"])
-    M_c = np.array(d["persistence"]["centered_L2_L26_matrix"])
+    p = d["persistence"]
+    # Backward compatibility with old key names
+    M_uc = np.array(p.get("uncentered_band_matrix") or p["uncentered_L2_L26_matrix"])
+    M_c = np.array(p.get("centered_band_matrix") or p["centered_L2_L26_matrix"])
+    band_label = p.get("band_label", "band")
     middle = d["middle_layers"]
+
+    off_uc = p.get("uncentered_band_mean_offdiag",
+                   p.get("uncentered_L2_L26_mean_offdiag"))
+    off_c = p.get("centered_band_mean_offdiag",
+                  p.get("centered_L2_L26_mean_offdiag"))
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.8))
     for ax, M, title, off in zip(
         axes,
         [M_uc, M_c],
         ["Uncentered top-PC alignment", "Centered top-PC alignment"],
-        [
-            d["persistence"]["uncentered_L2_L26_mean_offdiag"],
-            d["persistence"]["centered_L2_L26_mean_offdiag"],
-        ],
+        [off_uc, off_c],
     ):
         im = ax.imshow(M, cmap="viridis", vmin=0, vmax=1, origin="lower")
-        ax.set_xticks(range(0, len(middle), 5))
-        ax.set_xticklabels([f"L{middle[i]}" for i in range(0, len(middle), 5)])
-        ax.set_yticks(range(0, len(middle), 5))
-        ax.set_yticklabels([f"L{middle[i]}" for i in range(0, len(middle), 5)])
+        step = max(1, len(middle) // 5)
+        ax.set_xticks(range(0, len(middle), step))
+        ax.set_xticklabels([f"L{middle[i]}" for i in range(0, len(middle), step)])
+        ax.set_yticks(range(0, len(middle), step))
+        ax.set_yticklabels([f"L{middle[i]}" for i in range(0, len(middle), step)])
         ax.set_title(f"{title}\nmean off-diag = {off:.3f}")
         plt.colorbar(im, ax=ax, fraction=0.046)
 
     fig.suptitle(
-        f"Step 1: Cross-layer top-PC alignment, L2-L26 ({d['model']})",
+        f"Step 1: Cross-layer top-PC alignment, {band_label} ({d['model']})",
         fontsize=12,
     )
     plt.tight_layout()
-    out = out_dir / "carrier_persistence.png"
+    out = out_dir / f"carrier_persistence{suffix}.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  {out}")
 
 
-def fig_recovery(d: dict, out_dir: Path) -> None:
+def fig_recovery(d: dict, out_dir: Path, suffix: str = "") -> None:
     """Per-layer d_eff_c, original + carrier-removed for k in {1,2,3,5,10,20}."""
     n_layers = d["n_layers"]
     layer_idx = list(range(n_layers))
@@ -85,13 +91,13 @@ def fig_recovery(d: dict, out_dir: Path) -> None:
         fontsize=12,
     )
     plt.tight_layout()
-    out = out_dir / "carrier_recovery.png"
+    out = out_dir / f"carrier_recovery{suffix}.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  {out}")
 
 
-def fig_decomposition(d: dict, out_dir: Path) -> None:
+def fig_decomposition(d: dict, out_dir: Path, suffix: str = "") -> None:
     """Update decomposition: parallel/perp fractions + d_eff_c(Δ_perp)."""
     r1 = d["update_decomposition_rank1"]
     r5 = d["update_decomposition_rank5"]
@@ -132,13 +138,13 @@ def fig_decomposition(d: dict, out_dir: Path) -> None:
         fontsize=12,
     )
     plt.tight_layout()
-    out = out_dir / "carrier_decomposition.png"
+    out = out_dir / f"carrier_decomposition{suffix}.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  {out}")
 
 
-def fig_cosine(d: dict, out_dir: Path) -> None:
+def fig_cosine(d: dict, out_dir: Path, suffix: str = "") -> None:
     """The headline figure: raw cos vs carrier-removed cos per transition."""
     c = d["cosine_comparison"]
     t = [r["layer_from"] + 0.5 for r in c]
@@ -163,13 +169,13 @@ def fig_cosine(d: dict, out_dir: Path) -> None:
         "cos sim was tracking carrier persistence, not layer behavior."
     )
     plt.tight_layout()
-    out = out_dir / "carrier_cosine_comparison.png"
+    out = out_dir / f"carrier_cosine_comparison{suffix}.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  {out}")
 
 
-def fig_position(d: dict, out_dir: Path) -> None:
+def fig_position(d: dict, out_dir: Path, suffix: str = "") -> None:
     """Per-position carrier coefficient for representative middle layers."""
     pl = d["position_localization"]
     layers = sorted(int(k) for k in pl.keys())
@@ -198,7 +204,7 @@ def fig_position(d: dict, out_dir: Path) -> None:
         "(BOS / early-position spike → sink-like; broad → generic carrier)"
     )
     plt.tight_layout()
-    out = out_dir / "carrier_position_localization.png"
+    out = out_dir / f"carrier_position_localization{suffix}.png"
     plt.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  {out}")
@@ -210,6 +216,11 @@ def main() -> None:
         "--input", default="results/carrier_structure_qwen25_1.5b.json"
     )
     p.add_argument("--out-dir", default="docs/img")
+    p.add_argument(
+        "--suffix",
+        default="",
+        help='Filename suffix (e.g. "_gemma3_1b" -> carrier_persistence_gemma3_1b.png)',
+    )
     args = p.parse_args()
 
     d = load(Path(args.input))
@@ -217,11 +228,11 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("Generating figures:")
-    fig_persistence(d, out_dir)
-    fig_recovery(d, out_dir)
-    fig_decomposition(d, out_dir)
-    fig_cosine(d, out_dir)
-    fig_position(d, out_dir)
+    fig_persistence(d, out_dir, suffix=args.suffix)
+    fig_recovery(d, out_dir, suffix=args.suffix)
+    fig_decomposition(d, out_dir, suffix=args.suffix)
+    fig_cosine(d, out_dir, suffix=args.suffix)
+    fig_position(d, out_dir, suffix=args.suffix)
 
 
 if __name__ == "__main__":

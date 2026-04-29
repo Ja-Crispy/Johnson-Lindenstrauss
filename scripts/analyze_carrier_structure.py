@@ -170,6 +170,35 @@ def mean_offdiag(M: np.ndarray) -> float:
     return float(M[mask].mean())
 
 
+def detect_collapsed_band(
+    d_eff_c_per_layer: List[float], threshold: float = 5.0, min_length: int = 3
+) -> Tuple[int, int]:
+    """Find the longest contiguous run of layers with d_eff_c < threshold.
+
+    Returns (start, end_inclusive). If no band of min_length found, returns
+    (None, None) — caller should fall back to a sensible default or error.
+    """
+    n = len(d_eff_c_per_layer)
+    best_start, best_end, best_len = None, None, 0
+    i = 0
+    while i < n:
+        if d_eff_c_per_layer[i] < threshold:
+            j = i
+            while j < n and d_eff_c_per_layer[j] < threshold:
+                j += 1
+            run_len = j - i
+            if run_len > best_len:
+                best_len = run_len
+                best_start = i
+                best_end = j - 1
+            i = j
+        else:
+            i += 1
+    if best_len < min_length:
+        return None, None
+    return best_start, best_end
+
+
 # ---------------------------------------------------------------------------
 # Step 2: carrier basis from stacked uncentered SVD
 # ---------------------------------------------------------------------------
@@ -304,6 +333,17 @@ def main() -> None:
     parser.add_argument(
         "--output", default="results/carrier_structure_qwen25_1.5b.json"
     )
+    parser.add_argument(
+        "--collapse-threshold",
+        type=float,
+        default=5.0,
+        help="d_eff_c threshold for auto-detecting the collapsed band",
+    )
+    parser.add_argument(
+        "--band-override",
+        default=None,
+        help='Override auto-detection. Format "start,end" (inclusive).',
+    )
     args = parser.parse_args()
 
     print(f"Loading {args.model} in fp32")
@@ -333,10 +373,7 @@ def main() -> None:
 
     per_layer = concatenate_per_layer(per_seq)
 
-    middle_layers = list(range(2, 27))  # L2-L26 inclusive
-    middle_layers_inner = list(range(3, 26))  # L3-L25, sanity check
-
-    # Sanity: per-layer baseline d_eff (matches pilot)
+    # Per-layer baseline d_eff first — needed for auto-detecting the collapsed band
     print("\n[baseline] per-layer d_eff_uc / d_eff_c:")
     baseline = []
     for l in range(n_layers):
@@ -347,16 +384,47 @@ def main() -> None:
         print(f"  L{l:>2}: d_eff_uc={d_uc:>7.2f}  d_eff_c={d_c:>7.2f}  "
               f"||h||={baseline[-1]['norm_mean']:>7.2f}")
 
+    # ---------- Detect collapsed band ----------
+    if args.band_override:
+        start, end = (int(x) for x in args.band_override.split(","))
+        band_source = "manual override"
+    else:
+        d_eff_cs = [b["d_eff_c"] for b in baseline]
+        start, end = detect_collapsed_band(
+            d_eff_cs, threshold=args.collapse_threshold, min_length=3
+        )
+        band_source = f"auto (d_eff_c < {args.collapse_threshold})"
+
+    if start is None:
+        print(
+            "\n[warn] No collapsed band detected with threshold "
+            f"{args.collapse_threshold}. Using middle 80% of layers as fallback."
+        )
+        start = max(1, n_layers // 10)
+        end = max(start + 2, n_layers - n_layers // 10 - 1)
+        band_source = "fallback (middle 80%)"
+
+    middle_layers = list(range(start, end + 1))
+    inner_start = start + 1 if (end - start) >= 4 else start
+    inner_end = end - 1 if (end - start) >= 4 else end
+    middle_layers_inner = list(range(inner_start, inner_end + 1))
+
+    print(f"\n[band detection] collapsed band: L{start}-L{end} "
+          f"({len(middle_layers)} layers) — {band_source}")
+    print(f"  inner sanity check: L{inner_start}-L{inner_end}")
+
     # ---------- Step 1: persistence matrices ----------
-    print("\n[step 1] persistence matrices for L2-L26")
+    band_label = f"L{start}-L{end}"
+    inner_label = f"L{inner_start}-L{inner_end}"
+    print(f"\n[step 1] persistence matrices for {band_label}")
     M_uc, top_pcs_uc = persistence_matrix(per_layer, middle_layers, centered=False)
     M_c, top_pcs_c = persistence_matrix(per_layer, middle_layers, centered=True)
     M_uc_inner, _ = persistence_matrix(per_layer, middle_layers_inner, centered=False)
     M_c_inner, _ = persistence_matrix(per_layer, middle_layers_inner, centered=True)
-    print(f"  uncentered  L2-L26 mean off-diag alignment: {mean_offdiag(M_uc):.4f}")
-    print(f"  uncentered  L3-L25 mean off-diag alignment: {mean_offdiag(M_uc_inner):.4f}")
-    print(f"  centered    L2-L26 mean off-diag alignment: {mean_offdiag(M_c):.4f}")
-    print(f"  centered    L3-L25 mean off-diag alignment: {mean_offdiag(M_c_inner):.4f}")
+    print(f"  uncentered  {band_label} mean off-diag alignment: {mean_offdiag(M_uc):.4f}")
+    print(f"  uncentered  {inner_label} mean off-diag alignment: {mean_offdiag(M_uc_inner):.4f}")
+    print(f"  centered    {band_label} mean off-diag alignment: {mean_offdiag(M_c):.4f}")
+    print(f"  centered    {inner_label} mean off-diag alignment: {mean_offdiag(M_c_inner):.4f}")
 
     # ---------- Step 2: carrier basis ----------
     print("\n[step 2] stacked uncentered carrier basis (top-20)")
@@ -431,13 +499,21 @@ def main() -> None:
               f"{cos_raw - cos_perp:>+8.4f}")
 
     # ---------- Step 6: position localization ----------
-    print("\n[step 6] position localization for L7, L13, L20 (rank-1 carrier)")
-    pos_layers = [7, 13, 20]
+    # Pick 3 layers spaced through the detected band: 1/4, 1/2, 3/4 of the way
+    band_len = end - start + 1
+    pos_layers = [
+        start + max(1, band_len // 4),
+        start + band_len // 2,
+        start + (3 * band_len) // 4,
+    ]
+    pos_layers = sorted(set(pos_layers))
+    print(f"\n[step 6] position localization for layers {pos_layers} "
+          "(rank-1 carrier; report peak position, no a-priori labeling)")
     position_profiles = {}
     for pl in pos_layers:
         prof = position_carrier_profile(per_seq, pl, V_20[0])
         position_profiles[pl] = prof
-        print(f"  L{pl}: max-position={prof['global_max_pos']}, "
+        print(f"  L{pl}: peak-position={prof['global_max_pos']}, "
               f"max/median ratio={prof['ratio_max_to_median']:.2f}")
 
     # ---------- Save ----------
@@ -448,15 +524,24 @@ def main() -> None:
         "seq_len": args.seq_len,
         "n_layers": n_layers,
         "hidden_size": hidden_size,
+        "collapsed_band": {
+            "start": int(start),
+            "end_inclusive": int(end),
+            "n_layers": len(middle_layers),
+            "source": band_source,
+            "threshold": float(args.collapse_threshold),
+        },
         "middle_layers": middle_layers,
         "baseline_per_layer": baseline,
         "persistence": {
-            "uncentered_L2_L26_matrix": M_uc.tolist(),
-            "centered_L2_L26_matrix": M_c.tolist(),
-            "uncentered_L2_L26_mean_offdiag": mean_offdiag(M_uc),
-            "centered_L2_L26_mean_offdiag": mean_offdiag(M_c),
-            "uncentered_L3_L25_mean_offdiag": mean_offdiag(M_uc_inner),
-            "centered_L3_L25_mean_offdiag": mean_offdiag(M_c_inner),
+            "uncentered_band_matrix": M_uc.tolist(),
+            "centered_band_matrix": M_c.tolist(),
+            "uncentered_band_mean_offdiag": mean_offdiag(M_uc),
+            "centered_band_mean_offdiag": mean_offdiag(M_c),
+            "uncentered_inner_mean_offdiag": mean_offdiag(M_uc_inner),
+            "centered_inner_mean_offdiag": mean_offdiag(M_c_inner),
+            "band_label": band_label,
+            "inner_label": inner_label,
         },
         "carrier": {
             "stacked_top50_eigs": eigs_top50.tolist(),
