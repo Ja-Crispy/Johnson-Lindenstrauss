@@ -64,22 +64,34 @@ def load_calibration_text(n_chars: int = 200_000) -> str:
     raise FileNotFoundError("wikitext-2 not found")
 
 
-def extract_hidden_states_per_seq(model, tokenizer, n_seqs, seq_len, device):
+def extract_hidden_states_per_seq(model, tokenizer, n_seqs, seq_len, device,
+                                    add_bos: bool = False):
     """Returns (per_seq_hidden_states, token_ids).
 
     per_seq_hidden_states: list of length n_seqs, each a list of n_layers
         numpy arrays (seq_len, hidden_size) in fp32.
     token_ids: numpy array (n_seqs, seq_len) of int32 token ids used.
+
+    If add_bos=True, prepends the tokenizer's BOS token to each sequence
+    (truncating one content token to keep length fixed at seq_len). Default
+    is False to match the original "first content token at position 0" runs.
     """
     text = load_calibration_text()
     tokens = tokenizer.encode(text, add_special_tokens=False)
     if len(tokens) < n_seqs * seq_len:
         raise ValueError(f"Need {n_seqs * seq_len} tokens, have {len(tokens)}")
 
+    bos_id = getattr(tokenizer, "bos_token_id", None)
+    if add_bos and bos_id is None:
+        raise ValueError("Tokenizer has no bos_token_id but add_bos=True")
+    inner_len = seq_len - 1 if add_bos else seq_len
+
     per_seq = []
     token_ids_per_seq = []
     for i in range(n_seqs):
-        chunk = tokens[i * seq_len : (i + 1) * seq_len]
+        chunk = tokens[i * inner_len : (i + 1) * inner_len]
+        if add_bos:
+            chunk = [int(bos_id)] + list(chunk)
         token_ids_per_seq.append(chunk)
         ids = torch.tensor([chunk], device=device)
         with torch.no_grad():
@@ -376,6 +388,11 @@ def main() -> None:
         default=None,
         help='Override auto-detection. Format "start,end" (inclusive).',
     )
+    parser.add_argument(
+        "--add-bos",
+        action="store_true",
+        help="Prepend BOS token to each sequence (default: no special tokens).",
+    )
     args = parser.parse_args()
 
     print(f"Loading {args.model} in fp32")
@@ -386,9 +403,11 @@ def main() -> None:
     model.train(False)
 
     print(f"Extracting hidden states (fp32 forward): "
-          f"{args.n_seqs} seqs x {args.seq_len} tokens")
+          f"{args.n_seqs} seqs x {args.seq_len} tokens "
+          f"(add_bos={args.add_bos})")
     per_seq, token_ids = extract_hidden_states_per_seq(
-        model, tokenizer, args.n_seqs, args.seq_len, args.device
+        model, tokenizer, args.n_seqs, args.seq_len, args.device,
+        add_bos=args.add_bos,
     )
     n_layers = len(per_seq[0])
     seq_len = per_seq[0][0].shape[0]
@@ -609,6 +628,7 @@ def main() -> None:
     out = {
         "model": args.model,
         "precision_forward": "fp32",
+        "add_bos": bool(args.add_bos),
         "n_seqs": args.n_seqs,
         "seq_len": args.seq_len,
         "n_layers": n_layers,

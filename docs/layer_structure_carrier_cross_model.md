@@ -112,14 +112,57 @@ Our test on three other families shows:
 - **Not** a BOS test. Our setup explicitly omits BOS (`add_special_tokens=False`); we report position-0-localization, which is *similar to* but not identical to a BOS sink in token identity. Whether Qwen/Mistral position-0 sinks shift to a BOS token under a default tokenizer is untested.
 - **Not** a causal demonstration. We measure structure; we don't ablate the carrier and verify performance impact.
 
+## Multi-rank carrier dark alignment (refining the rank-1 picture)
+
+Rank-1 alignment with W_unembed tail-100 (above) is partial. The full top-5 carrier subspace is more dark-aligned in all three models, but the *ordering* differs by family:
+
+| Model | rank-1 (tail-100) | rank-2 | rank-3 | rank-3 in tail-20 |
+|---|---:|---:|---:|---:|
+| Qwen | **5.4×** | 4.3× | 3.8× | 6.5× |
+| Gemma | 0.1× | 2.4× | 2.1× | 4.9× |
+| Mistral | 1.7× | 3.2× | **7.7×** | **23.6×** |
+
+Mistral's third carrier direction is essentially Cancedda's darkest direction — 23× random in the very tail. Gemma's secondary carrier dimensions are dark too, but its primary (rank-1) is bright. **All three models have dark components in their carrier subspace; only the ranking and concentration differ.**
+
+## CKA baseline comparison
+
+We compared adjacent-layer linear CKA (Kornblith 2019) against cos sim, raw and carrier-removed, on all three models. Code: `scripts/compute_cka.py`. Plots: `docs/img/cka_vs_cos_<model>.png`.
+
+| Model | raw cos sim band | raw CKA band | k=1 cos gap | k=1 CKA gap |
+|---|---|---|---:|---:|
+| Qwen2.5-1.5B | 0.85-0.96 (varies) | **0.998-1.000 (saturated)** | 0.0004 | ~0.05 |
+| Mistral-7B | 0.83-0.95 (varies) | **0.999-1.000 (hyper-saturated)** | 0.001 | ~0.005 |
+| Gemma-3-1B | **0.97-0.99 (flat)** | 0.4-0.99 (varies dramatically) | 0.14 | tracks raw |
+
+**CKA is not a fix.** On Qwen and Mistral (sink-style), raw CKA is *even more* saturated than cos sim — 1.000 across the entire middle band. On Gemma (bright-carrier), raw CKA naturally exposes layer-to-layer variation that cos sim flattens.
+
+The mathematical intuition: CKA centers and uses Gram matrices. When the carrier is hyper-localized (Qwen/Mistral position-0 outliers), centering doesn't fully remove its effect on the Gram structure — CKA gets dominated. When the carrier is position-uniform (Gemma), centering effectively discounts it, and CKA's behavior tracks the perpendicular subspace.
+
+This means **every standard adjacent-layer similarity metric has a carrier-dependent failure mode**. The right answer isn't "switch metrics" — it's structural decomposition of what's underneath.
+
+## BOS-included rerun
+
+Original results used `tokenizer.encode(..., add_special_tokens=False)` — no BOS token, so position 0 is the first content token. Cancedda's setup includes BOS. To test whether the sink we observed shifts to BOS when present:
+
+| Model | BOS available? | Without BOS (peak/ratio) | With BOS (peak/ratio) | Dark alignment unchanged? |
+|---|---|---|---|---|
+| Qwen2.5-1.5B | **No (tokenizer has no BOS token)** | pos 0, ratio 4083 (L8) | n/a | n/a — Qwen has no BOS option |
+| Gemma-3-1B | Yes (`<bos>`) | uniform, ratio 1.7 (L11) | **pos 0, ratio 10.4** (L9) | yes (0.88% / 0.10× random in both) |
+| Mistral-7B | Yes (`<s>`) | pos 0, ratio 987 (L7) | **pos 0, ratio 2496 (L6)** | yes (1.72× → 1.81× random) |
+
+Two clean findings:
+
+1. **Qwen2.5's tokenizer literally has no BOS token.** Whatever sink Qwen has must be anchored on the first content token, not a special token. The "position-0 sink" framing is necessarily about first-position rather than special-token absorption.
+2. **Carrier identity (dark/bright) is BOS-invariant.** Both Gemma and Mistral show the same dark-alignment fraction with and without BOS. What changes is the *intensity* of position-0 absorption — BOS, when present, absorbs more carrier energy than a content token would. This is consistent with Cancedda's BOS-as-sink mechanism for the sink-aligned models.
+
+So BOS handling matters for sink intensity but not carrier dark/bright identity. The structural finding (dark vs bright carrier) is robust.
+
 ## Outstanding questions worth flagging
 
-1. **What is Gemma's carrier doing?** Bright-aligned, position-uniform, persistent across 16 layers. Different mechanism from Cancedda's sinks. We have no story for what it computes.
-2. **BOS-included rerun.** Re-run the same three models with `add_special_tokens=True` to see whether the position-0 sink moves to BOS token explicitly. ~10 min compute, no new code.
-3. **Mistral's rank-2 dark alignment.** We measured rank-1 carrier vs unembedding tail. Mistral's carrier is rank-2 (top-2 explains 89%). The second carrier direction may be more strongly dark.
-4. **CKA comparison.** Standard layer-similarity baseline. Would tell us whether CKA already discounts the carrier (in which case our carrier-removed cos sim is "CKA's lite version") or not (in which case we have something new).
-5. **Causal ablation.** Forward-pass intervention removing the carrier subspace, with PPL / NLL evaluation. This is the gold-standard test for "is the carrier load-bearing." Multi-hour, more involved.
-6. **Llama-3.2-1B.** Cancedda used LLaMa2; LLaMa3 family has different training. Free run if it loads.
+1. **What is Gemma's carrier doing?** Bright-aligned regardless of BOS. The unembedding actively reads from it. We have no story for what it computes.
+2. **Causal ablation.** Forward-pass intervention removing the carrier subspace, with PPL / NLL evaluation. Gold-standard test for whether the carrier is load-bearing. Multi-hour, more involved.
+3. **Llama-3.2-1B.** Cancedda used LLaMa2; LLaMa3 family has different training. Free run if it loads. Not done yet.
+4. **Why does CKA saturate on sink-style models?** Centering should discount uniform features but it doesn't kill outlier-position features. Worth a small theoretical note.
 
 ## Where this could go (not committed)
 
