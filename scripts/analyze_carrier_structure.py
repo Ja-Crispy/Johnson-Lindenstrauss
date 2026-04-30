@@ -65,8 +65,11 @@ def load_calibration_text(n_chars: int = 200_000) -> str:
 
 
 def extract_hidden_states_per_seq(model, tokenizer, n_seqs, seq_len, device):
-    """Returns list of length n_seqs, each a list of n_layers numpy arrays
-    (seq_len, hidden_size). All in fp32.
+    """Returns (per_seq_hidden_states, token_ids).
+
+    per_seq_hidden_states: list of length n_seqs, each a list of n_layers
+        numpy arrays (seq_len, hidden_size) in fp32.
+    token_ids: numpy array (n_seqs, seq_len) of int32 token ids used.
     """
     text = load_calibration_text()
     tokens = tokenizer.encode(text, add_special_tokens=False)
@@ -74,8 +77,10 @@ def extract_hidden_states_per_seq(model, tokenizer, n_seqs, seq_len, device):
         raise ValueError(f"Need {n_seqs * seq_len} tokens, have {len(tokens)}")
 
     per_seq = []
+    token_ids_per_seq = []
     for i in range(n_seqs):
         chunk = tokens[i * seq_len : (i + 1) * seq_len]
+        token_ids_per_seq.append(chunk)
         ids = torch.tensor([chunk], device=device)
         with torch.no_grad():
             out = model(ids, use_cache=False, output_hidden_states=True, return_dict=True)
@@ -89,7 +94,7 @@ def extract_hidden_states_per_seq(model, tokenizer, n_seqs, seq_len, device):
                 torch.mps.empty_cache()
             except AttributeError:
                 pass
-    return per_seq
+    return per_seq, np.array(token_ids_per_seq, dtype=np.int32)
 
 
 def concatenate_per_layer(per_seq: List[List[np.ndarray]]) -> List[np.ndarray]:
@@ -112,28 +117,42 @@ def participation_ratio(eigvals: np.ndarray) -> float:
     return (s ** 2) / s2 if s2 > 0 else float(len(eigvals))
 
 
+def _gram_eig(X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Eigenvalues and right singular vectors of X via Gram matrix.
+
+    Memory: O(D^2) for the Gram matrix instead of O(N*D) for full SVD's U.
+    Returns (eigvals_descending, top_eigenvecs_descending) where each row
+    of eigvecs is a right singular vector. Singular values squared = eigvals.
+    """
+    X64 = X.astype(np.float64, copy=False)
+    G = X64.T @ X64  # (D, D)
+    eigvals, eigvecs = np.linalg.eigh(G)
+    # eigh returns ascending; flip to descending
+    eigvals = eigvals[::-1]
+    eigvecs = eigvecs[:, ::-1]
+    eigvals = np.clip(eigvals, 0.0, None)
+    return eigvals, eigvecs.T  # rows = right singular vectors
+
+
 def d_eff_uncentered(h: np.ndarray) -> Tuple[float, np.ndarray]:
     """Returns (d_eff_uc, top right singular vector v_1)."""
-    h64 = h.astype(np.float64)
-    _, sigma, Vt = np.linalg.svd(h64, full_matrices=False)
-    eig = sigma ** 2
-    return participation_ratio(eig), Vt[0]
+    eigvals, vecs = _gram_eig(h)
+    return participation_ratio(eigvals), vecs[0]
 
 
 def d_eff_centered(h: np.ndarray) -> Tuple[float, np.ndarray]:
     """Returns (d_eff_c, top centered eigenvector)."""
-    h64 = h.astype(np.float64)
+    h64 = h.astype(np.float64, copy=False)
     h_c = h64 - h64.mean(axis=0)
-    _, sigma, Vt = np.linalg.svd(h_c, full_matrices=False)
-    eig = sigma ** 2
-    return participation_ratio(eig), Vt[0]
+    eigvals, vecs = _gram_eig(h_c)
+    return participation_ratio(eigvals), vecs[0]
 
 
 def d_eff_centered_only(h: np.ndarray) -> float:
-    h64 = h.astype(np.float64)
+    h64 = h.astype(np.float64, copy=False)
     h_c = h64 - h64.mean(axis=0)
-    _, sigma, _ = np.linalg.svd(h_c, full_matrices=False)
-    return participation_ratio(sigma ** 2)
+    eigvals, _ = _gram_eig(h_c)
+    return participation_ratio(eigvals)
 
 
 # ---------------------------------------------------------------------------
@@ -144,15 +163,15 @@ def persistence_matrix(
     per_layer: List[np.ndarray], layer_indices: List[int], centered: bool
 ) -> Tuple[np.ndarray, Dict[int, np.ndarray]]:
     """Build alignment matrix |v_1^(i) . v_1^(j)| over the given layers.
-    Returns (matrix, dict layer -> v_1).
+    Returns (matrix, dict layer -> v_1). Uses Gram-matrix eigh (memory O(D^2)).
     """
     top_pcs: Dict[int, np.ndarray] = {}
     for l in layer_indices:
-        h = per_layer[l].astype(np.float64)
+        h = per_layer[l].astype(np.float64, copy=False)
         if centered:
             h = h - h.mean(axis=0)
-        _, _, Vt = np.linalg.svd(h, full_matrices=False)
-        top_pcs[l] = Vt[0]
+        _, vecs = _gram_eig(h)
+        top_pcs[l] = vecs[0]
 
     n = len(layer_indices)
     M = np.zeros((n, n), dtype=np.float64)
@@ -207,13 +226,26 @@ def stacked_carrier_basis(
     per_layer: List[np.ndarray], layer_indices: List[int], k_max: int = 20
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Top-k_max right singular vectors of stacked uncentered activations.
+
+    Memory-efficient: builds Gram matrix X^T X (D x D) by accumulating
+    per-layer X^T X without materializing the full stacked tensor.
+    For Mistral D=4096 the Gram is 134 MB instead of (N*D, D) = 3.4+ GB.
+
     Returns (V_k_max with shape (k_max, D), eigenvalue spectrum first 50).
     """
-    stacked = np.concatenate(
-        [per_layer[l] for l in layer_indices], axis=0
-    ).astype(np.float64)
-    _, sigma, Vt = np.linalg.svd(stacked, full_matrices=False)
-    return Vt[:k_max].copy(), (sigma[:50] ** 2).copy()
+    if not layer_indices:
+        raise ValueError("layer_indices empty")
+    D = per_layer[layer_indices[0]].shape[1]
+    G = np.zeros((D, D), dtype=np.float64)
+    for l in layer_indices:
+        Xl = per_layer[l].astype(np.float64, copy=False)
+        G += Xl.T @ Xl
+    eigvals, eigvecs = np.linalg.eigh(G)
+    eigvals = eigvals[::-1]
+    eigvecs = eigvecs[:, ::-1]
+    eigvals = np.clip(eigvals, 0.0, None)
+    Vt = eigvecs.T  # rows = right singular vectors
+    return Vt[:k_max].copy(), eigvals[:50].copy()
 
 
 def sign_aligned_mean_pc(
@@ -355,7 +387,7 @@ def main() -> None:
 
     print(f"Extracting hidden states (fp32 forward): "
           f"{args.n_seqs} seqs x {args.seq_len} tokens")
-    per_seq = extract_hidden_states_per_seq(
+    per_seq, token_ids = extract_hidden_states_per_seq(
         model, tokenizer, args.n_seqs, args.seq_len, args.device
     )
     n_layers = len(per_seq[0])
@@ -363,6 +395,19 @@ def main() -> None:
     hidden_size = per_seq[0][0].shape[1]
     print(f"  {n_layers} layers, {args.n_seqs} seqs of {seq_len} tokens, "
           f"hidden_dim={hidden_size}")
+
+    # Capture unembedding (output embedding) BEFORE deleting the model.
+    # We save its SVD spectral basis, not raw weights, for the dark-subspace
+    # test (Cancedda 2024).
+    output_emb = model.get_output_embeddings()
+    if output_emb is None or output_emb.weight is None:
+        print("  warning: no output embedding (lm_head) found; spectral basis skipped")
+        lm_head_weight = None
+    else:
+        lm_head_weight = output_emb.weight.detach().cpu().to(torch.float32).numpy()
+        print(f"  unembedding W: {lm_head_weight.shape}")
+    bos_token_id = getattr(tokenizer, "bos_token_id", None)
+    bos_token = getattr(tokenizer, "bos_token", None)
 
     del model
     if args.device == "mps":
@@ -454,7 +499,8 @@ def main() -> None:
         for k in k_sweep:
             h_perp = project_off_subspace(h.astype(np.float64), V_20[:k])
             d_c_by_k[k] = d_eff_centered_only(h_perp)
-            d_uc_by_k[k] = participation_ratio(np.linalg.svd(h_perp, full_matrices=False)[1] ** 2)
+            uc_eigvals, _ = _gram_eig(h_perp)
+            d_uc_by_k[k] = participation_ratio(uc_eigvals)
             recovery[k].append({"layer": l, "d_eff_c": d_c_by_k[k]})
             recovery_uc[k].append({"layer": l, "d_eff_uc": d_uc_by_k[k]})
         cells = "  ".join(f"{d_c_by_k[k]:>7.2f}" for k in k_sweep)
@@ -480,23 +526,34 @@ def main() -> None:
               f"{d1['d_eff_c_delta_perp']:>11.2f}  "
               f"{d5['d_eff_c_delta_perp']:>11.2f}")
 
-    # ---------- Step 5: carrier-removed cosine ----------
-    print("\n[step 5] carrier-removed cosine (rank-1)")
+    # ---------- Step 5: carrier-removed cosine (multi-rank) ----------
+    cos_ranks = [1, 2, 3, 5]
+    print(f"\n[step 5] carrier-removed cosine, k in {cos_ranks}")
     cosines = []
-    print(f"  {'l→l+1':>6}  {'cos_raw':>8}  {'cos_perp':>9}  {'gap':>8}")
+    cells_header = "  ".join(f"cos⊥k={k}".rjust(8) for k in cos_ranks)
+    print(f"  {'l→l+1':>6}  {'cos_raw':>8}  {cells_header}")
     for l in range(n_layers - 1):
         cos_raw = cos_per_position(per_layer[l], per_layer[l + 1])
-        h_l_perp = project_off_subspace(per_layer[l].astype(np.float64), V_20[:1])
-        h_lp1_perp = project_off_subspace(per_layer[l + 1].astype(np.float64), V_20[:1])
-        cos_perp = cos_per_position(h_l_perp, h_lp1_perp)
-        cosines.append({
+        entry = {
             "layer_from": l,
             "cos_raw": cos_raw,
-            "cos_perp": cos_perp,
-            "gap": cos_raw - cos_perp,
-        })
-        print(f"  {l:>2}→{l+1:<2}  {cos_raw:>8.4f}  {cos_perp:>9.4f}  "
-              f"{cos_raw - cos_perp:>+8.4f}")
+            # legacy single-rank field (rank-1) for backward compat with old plotter
+            "cos_perp": None,
+            "gap": None,
+        }
+        cells = []
+        for k in cos_ranks:
+            h_l_perp = project_off_subspace(per_layer[l].astype(np.float64), V_20[:k])
+            h_lp1_perp = project_off_subspace(per_layer[l + 1].astype(np.float64), V_20[:k])
+            cos_perp_k = cos_per_position(h_l_perp, h_lp1_perp)
+            entry[f"cos_perp_k{k}"] = cos_perp_k
+            entry[f"gap_k{k}"] = cos_raw - cos_perp_k
+            cells.append(f"{cos_perp_k:>8.4f}")
+            if k == 1:
+                entry["cos_perp"] = cos_perp_k
+                entry["gap"] = cos_raw - cos_perp_k
+        cosines.append(entry)
+        print(f"  {l:>2}→{l+1:<2}  {cos_raw:>8.4f}  " + "  ".join(cells))
 
     # ---------- Step 6: position localization ----------
     # Pick 3 layers spaced through the detected band: 1/4, 1/2, 3/4 of the way
@@ -515,6 +572,38 @@ def main() -> None:
         position_profiles[pl] = prof
         print(f"  L{pl}: peak-position={prof['global_max_pos']}, "
               f"max/median ratio={prof['ratio_max_to_median']:.2f}")
+
+    # ---------- Step 7: unembedding spectral basis (for Cancedda dark-subspace test) ----------
+    if lm_head_weight is not None:
+        print("\n[step 7] unembedding W spectral decomposition")
+        # SVD of W_unembed in float64. Right singular vectors (rows of Vt_lm)
+        # live in residual-stream space; ordered by descending singular value.
+        # Top-k = "bright" directions (project to logits with high gain).
+        # Bottom-k = "dark" directions (Cancedda 2024).
+        # Gram-matrix SVD: avoids materializing U which is (vocab_size, D)
+        # and would be ~1 GB for Mistral. We only need sigma and Vt.
+        W64 = lm_head_weight.astype(np.float64, copy=False)
+        G_lm = W64.T @ W64
+        eig_lm, eigvecs_lm = np.linalg.eigh(G_lm)
+        eig_lm = np.clip(eig_lm[::-1], 0.0, None)
+        eigvecs_lm = eigvecs_lm[:, ::-1]
+        sigma_lm = np.sqrt(eig_lm).astype(np.float32)
+        Vt_lm = eigvecs_lm.T.astype(np.float32)
+        del W64, G_lm, eig_lm, eigvecs_lm
+        sv_max = float(sigma_lm[0])
+        sv_min = float(sigma_lm[-1])
+        sv_ratio = sv_max / max(sv_min, 1e-12)
+        print(f"  W_unembed shape: {lm_head_weight.shape}")
+        print(f"  singular values: max={sv_max:.4f}, min={sv_min:.6f}, ratio={sv_ratio:.2f}")
+        # Quick alignment of carrier top-1 with unembedding tail
+        for k_tail in [1, 5, 20, 50, 100]:
+            tail_basis = Vt_lm[-k_tail:]  # (k_tail, D)
+            c1_in_tail = float(np.sum((V_20[0] @ tail_basis.T) ** 2))
+            print(f"  carrier c_1 fraction in W_unembed tail-{k_tail}: "
+                  f"{c1_in_tail:.4f}")
+    else:
+        sigma_lm = None
+        Vt_lm = None
 
     # ---------- Save ----------
     out = {
@@ -560,7 +649,31 @@ def main() -> None:
         "update_decomposition_rank1": decomp_r1,
         "update_decomposition_rank5": decomp_r5,
         "cosine_comparison": cosines,
+        "cosine_ranks_swept": cos_ranks,
         "position_localization": position_profiles,
+        "tokenizer": {
+            "bos_token_id": bos_token_id,
+            "bos_token": bos_token,
+        },
+        "unembedding_summary": (
+            None if sigma_lm is None
+            else {
+                "shape": list(lm_head_weight.shape),
+                "sigma_max": float(sigma_lm[0]),
+                "sigma_min": float(sigma_lm[-1]),
+                "sigma_ratio": float(sigma_lm[0] / max(sigma_lm[-1], 1e-12)),
+                "n_singular_values": int(len(sigma_lm)),
+                "carrier_c1_fraction_in_tail_k1": (
+                    float(np.sum((V_20[0] @ Vt_lm[-1:].T) ** 2))
+                ),
+                "carrier_c1_fraction_in_tail_k20": (
+                    float(np.sum((V_20[0] @ Vt_lm[-20:].T) ** 2))
+                ),
+                "carrier_c1_fraction_in_tail_k100": (
+                    float(np.sum((V_20[0] @ Vt_lm[-100:].T) ** 2))
+                ),
+            }
+        ),
     }
 
     out_path = Path(args.output)
@@ -578,11 +691,39 @@ def main() -> None:
 
     out_path.write_text(json.dumps(out, indent=2, default=default_serialize))
 
-    # Save the carrier basis separately (npz, not in JSON)
+    # Save numerical artifacts (npz, not in JSON):
+    #   - V_20: carrier basis (top-20 right singular vectors of stacked
+    #     uncentered band activations)
+    #   - c_avg: sign-aligned mean of per-layer top PCs
+    #   - sigma_unembed, Vt_unembed: W_unembed SVD spectral basis (for
+    #     Cancedda dark-subspace test)
+    #   - token_ids: input ids used during forward (n_seqs, seq_len)
+    #   - bos_token_id: tokenizer's BOS id (or -1 if none)
+    #   - hidden_state_layer_<l>: per-layer concatenated activations
+    #     (n_seqs * seq_len, hidden_size) in fp32. Saved per-layer rather
+    #     than as a stacked tensor to allow lazy per-layer loading later.
     npz_path = out_path.with_suffix(".npz")
-    np.savez_compressed(npz_path, V_20=V_20, c_avg=c_avg)
+    payload = {
+        "V_20": V_20,
+        "c_avg": c_avg,
+        "token_ids": token_ids,
+        "bos_token_id": np.array([bos_token_id if bos_token_id is not None else -1],
+                                  dtype=np.int64),
+    }
+    if sigma_lm is not None:
+        payload["sigma_unembed"] = sigma_lm
+        payload["Vt_unembed"] = Vt_lm
+    for l in range(n_layers):
+        payload[f"hidden_state_layer_{l}"] = per_layer[l].astype(np.float32)
+    np.savez_compressed(npz_path, **payload)
+
     print(f"\nSaved: {out_path}")
-    print(f"Saved: {npz_path} (carrier basis V_20 + sign-aligned mean PC)")
+    print(f"Saved: {npz_path}")
+    print(f"  carrier basis V_20, c_avg, token_ids ({token_ids.shape})")
+    if sigma_lm is not None:
+        print(f"  W_unembed spectral basis Vt_unembed {Vt_lm.shape} + sigma "
+              f"({len(sigma_lm)} values)")
+    print(f"  hidden states for {n_layers} layers (fp32, {per_layer[0].shape})")
 
 
 if __name__ == "__main__":

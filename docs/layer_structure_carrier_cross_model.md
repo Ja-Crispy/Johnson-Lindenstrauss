@@ -1,27 +1,37 @@
 # Carrier Decomposition Across Three Dense Models
 
-**Status (2026-04-29):** Cross-model extension of the carrier-decomposition mechanism test. n=3 case studies from three families: Qwen, Gemma, Mistral. All three confirm the carrier phenomenon. The carrier's *identity* and the cosine-confound it produces vary across families.
+**Status (2026-04-30):** Cross-model carrier-decomposition with dark-subspace test (Cancedda 2024 framework). n=3 case studies: Qwen2.5-1.5B, Gemma-3-1B-IT, Mistral-7B-Instruct-v0.3. Three different patterns of how the residual-stream carrier interacts with the unembedding spectrum. **The cleanest discriminator across families is whether the carrier is dark-aligned or bright-aligned in the unembedding's right-singular basis.**
 
 This is a follow-up to:
-- `docs/layer_structure_pilot.md` (n=1, original pilot)
-- `docs/layer_structure_carrier_test.md` (n=1, mechanism test on Qwen2.5-1.5B)
+- `docs/layer_structure_pilot.md` (n=1 pilot)
+- `docs/layer_structure_carrier_test.md` (n=1 mechanism test on Qwen2.5-1.5B)
 
-The Qwen results in those documents are reproduced here in the cross-model table; the substantive new content is Gemma-3-1B and Mistral-7B-Instruct-v0.3.
+This document supersedes the prior n=3 cross-model write (which did not include the dark-subspace test). It now incorporates: extended (multi-rank) cosine measurement, hidden-state archival for downstream tests, unembedding spectral basis, and Cancedda 2024 positioning.
 
 ---
 
 ## Headline (one paragraph)
 
-Across three families on Apple Silicon (Qwen2.5-1.5B, Gemma-3-1B-IT, Mistral-7B-Instruct-v0.3), the residual stream's middle-layer apparent 1-D collapse is in every case explained by a low-rank persistent carrier subspace. After projecting off that subspace, per-layer `d_eff_c` jumps from ~1 to tens or hundreds in all three models — confirming "rich variance was hidden under a small dominant subspace" is general, not Qwen-specific. **What varies is the carrier's identity.** Two models (Qwen and Mistral) carry a position-0 / BOS-localized attention sink; one model (Gemma) carries a position-uniform feature. **The cosine-confound depends on this identity:** when the carrier is a sink, removing it does *not* unflatten adjacent-layer cosine (the perpendicular content also persists per-token); when the carrier is non-sink uniform, removing it *does* unflatten cosine substantially. This is a sharper version of Muyu's #2 critique: cosine is direction-blind in a way that depends on what the dominant direction is.
+Three dense transformer families show three structurally different residual-stream regimes. **All have a low-rank persistent carrier subspace** (top-PC alignment ≥ 0.99 in the inner band; top-1 captures 84–98% of variance). **All show d_eff_c recovery from ~1 to tens or hundreds** when the carrier subspace is removed. But the carrier's **identity differs** along two axes:
+
+1. **Dark-vs-bright alignment in the unembedding spectrum.** Qwen's carrier sits in W_unembed's tail at 5.4× the random baseline (partially dark — Cancedda-like sink). Mistral's at 1.7× (mildly dark). **Gemma's at 0.1× — actively *anti*-dark, in the bright subspace** that the unembedding reads.
+2. **Position localization at first-token / position 0.** Qwen and Mistral show massive activations at position 0 (max/median 70–4000×). Gemma does not (max/median ≈ 1.7).
+
+These two axes correlate: position-0-localized carriers are dark-aligned; the position-uniform carrier is bright-aligned. The cosine confound also tracks: removing the dark-aligned (sink-style) carrier barely moves cosine, but removing the bright-aligned (Gemma) carrier unflattens cosine by 0.1–0.34 across most middle transitions.
+
+Cancedda 2024 demonstrated the dark-signal sink mechanism on **LLaMa2 only**. Our cross-family test extends his framework qualitatively to Qwen and Mistral (more weakly), and produces a clean counterexample in Gemma whose carrier mechanism is mechanistically distinct.
 
 ## Setup
 
 All three runs use:
-- 8 wikitext sequences × 512 tokens
-- fp32 forward + analysis
+- 8 wikitext sequences × 512 tokens, fp32 forward + analysis
 - Auto-detected collapsed band (`d_eff_c < 5.0`, longest contiguous run)
 - Position-localization at three layers spaced through the detected band
+- Multi-rank carrier-removed cosine, k ∈ {1, 2, 3, 5}
+- Hidden states + W_unembed spectral basis archived to .npz for downstream tests
 - Code: `scripts/analyze_carrier_structure.py`, `scripts/plot_carrier_structure.py`
+
+**Important methodological caveat: BOS handling.** We use `tokenizer.encode(text, add_special_tokens=False)`, which means **no BOS token is prepended** to the input. The "position 0" we report is the first wikitext content token, not a BOS. Cancedda's analysis assumed LLaMa2's default tokenizer (which auto-prepends `<s>`), so his "BOS sink" is anchored on a deliberate special token. Our equivalent finding ("first-position sink") is similar in geometry but different in token identity. Whether the Qwen/Mistral position-0 sink moves to a BOS token if one were prepended is **untested in this run**.
 
 ## Cross-model summary
 
@@ -36,75 +46,88 @@ All three runs use:
 | Top-1 var explained | 97.85% | 98.03% | **84.42%** |
 | Top-2 var explained | 99.22% | 98.32% | 89.39% |
 | Top-5 var explained | 99.41% | 98.68% | 94.29% |
-| Effective carrier rank | 1 | 1 | 2–3 |
-| Carrier-removed cos gap, band (max / mean) | 0.0016 / 0.0004 | **0.342 / 0.136** | 0.0063 / 0.0012 |
-| Position-localization peaks | pos 0 / 0 / 0 | pos 460 / 460 / 46 | pos 0 / 0 / 0 |
-| Position max/median ratio | 5172 / 2735 / 1749 | **1.7 / 1.7 / 1.5** | 987 / 252 / 73 |
-| Δ_⊥ fraction band (min/mean/max) | 98.6 / 99.7 / 99.9% | 20.2 / 61.9 / 87.8% | 98.3 / 99.3 / 99.8% |
+| Position localization peak | pos 0 | pos 460 | pos 0 |
+| Position max/median (mid-band) | **2403** | **1.7** | **252** |
+| Δ_⊥ band fraction (mean) | 99.7% | 61.9% | 99.3% |
+| **Carrier in W_unembed tail-100** | **5.4× random** | **0.1× random** | **1.7× random** |
+| Cosine gap k=1 / k=2 / k=5 (band mean) | 0.0004 / 0.014 / 0.026 | **0.136** / 0.142 / 0.149 | 0.0012 / 0.002 / 0.006 |
 
 ## What's universal
 
-1. **Persistent low-rank carrier exists in every model.** Inner-band persistence is 0.999+ in all three. The full-band number being lower for Mistral (0.92) is driven by L1, which has a different top-PC than the rest of the band; trimming to L2–L25 brings persistence to 0.9991.
-2. **d_eff_c recovery works in every model.** After projecting off rank-1 (Qwen, Gemma) or rank-2 (Mistral), middle layers go from `d_eff_c ≈ 1` to tens or hundreds. The "1-D collapse" was always a measurement artifact of one or two dominant directions.
-3. **Layer updates compute mostly perpendicular to the carrier in sink-style models.** Δ_⊥ is 99%+ on Qwen and Mistral.
+1. **Persistent low-rank carrier in every model.** Inner-band persistence is 0.999+ in all three.
+2. **d_eff_c recovery in every model.** After projecting off rank-1 (Qwen, Gemma) or rank-2 (Mistral), middle layers go from `d_eff_c ≈ 1` to tens or hundreds.
+3. **Off-carrier updates dominate in sink-style models.** Qwen and Mistral both have Δ_⊥ at 99%+; the model is computing perpendicular to the carrier.
 
 ## What varies
 
-### Carrier identity: sink vs. non-sink
-
-| Model | Peak position (L_mid) | Max/median ratio |
-|---|---:|---:|
-| Qwen2.5-1.5B | 0 (BOS) | 2735 |
-| Gemma-3-1B | 460 | 1.7 |
-| Mistral-7B | 0 (BOS) | 252 |
-
-**Qwen and Mistral**: massive activation at position 0 across all sampled middle layers, with max/median ratios 70× to 5000×. Textbook attention-sink phenomenon (StreamingLLM, Sun et al. 2024 "Massive Activations").
-
-**Gemma**: peak position is not 0, varies between layers (460, 460, 46), and the localization is essentially absent (max/median ratio 1.5–1.7). Gemma's carrier is a **position-uniform feature** — a single direction in feature space that all positions activate roughly equally. Not a sink in the StreamingLLM sense.
-
 ### Carrier rank: rank-1 (Qwen, Gemma) vs rank-2/3 (Mistral)
 
-Mistral's recovery curve has a distinctive shape: removing rank-1 barely improves d_eff_c (1.14 → 1.40 at L7), but removing rank-2 jumps it to 74.78. Rank-3 to 164. So Mistral has at least two carrier directions of comparable magnitude, and the d_eff collapse is dominated by their *combined* subspace, not by a single direction.
+Mistral's recovery curve at L7 jumps from 1.40 (k=1) to 74.78 (k=2). Top-1 captures only 84% of stacked variance vs Qwen/Gemma's 98%. Mistral's carrier subspace is genuinely 2-dimensional, not a single direction.
 
-Qwen and Gemma are clean rank-1: top-1 captures 98% of variance.
+### Dark-subspace alignment: the new cleanest discriminator
 
-### Cosine confound: response to carrier removal
+For each model, we computed the squared projection of the rank-1 carrier `c_1` onto the bottom-100 right singular vectors of W_unembed. Random direction baseline = 100 / hidden_size.
 
-This is the most interesting axis.
+| Model | hidden_size | Random tail-100 | Carrier in tail-100 | Dark multiplier |
+|---|---:|---:|---:|---:|
+| Qwen2.5-1.5B | 1536 | 6.5% | 35.3% | **5.4× random** |
+| Gemma-3-1B | 1152 | 8.7% | **0.88%** | **0.1× random (anti-dark)** |
+| Mistral-7B | 4096 | 2.4% | 4.21% | **1.7× random** |
 
-| Model | Mean carrier-removed cos gap (band) | Max gap | Carrier-removed cos behavior |
-|---|---:|---:|---|
-| Qwen2.5-1.5B | 0.0004 | 0.0016 | Effectively unchanged from raw |
-| Mistral-7B | 0.0012 | 0.0063 | Effectively unchanged from raw |
-| Gemma-3-1B | **0.136** | **0.342** | **Substantially below raw** |
+Qwen's carrier is partially dark — the unembedding mostly ignores it, consistent with Cancedda's sink-as-dark-signal picture. Mistral's is mildly dark — Cancedda's framework applies weakly. **Gemma's carrier is in the bright subspace**, the one the unembedding actually reads to produce logits. Whatever Gemma's carrier is for, it isn't a Cancedda-style attention sink.
 
-On Qwen and Mistral (sink-carrier models), removing the carrier doesn't unflatten cosine. The off-carrier perpendicular content also persists per-token across layers, so per-token cosine remains high even after the sink is removed.
+### Cosine confound: response to carrier removal at k=1, 2, 3, 5
 
-On Gemma (non-sink carrier), removing the carrier *does* unflatten cosine substantially. Specific transitions show carrier-removed cos as low as 0.64 while raw cos is 0.98 (L17→18). The original Muyu hypothesis — "cosine is hiding layer-to-layer change because of the dominant direction" — works as predicted on Gemma.
+| Model | Mean band gap k=1 | k=2 | k=3 | k=5 |
+|---|---:|---:|---:|---:|
+| Qwen2.5-1.5B | 0.0004 | 0.014 | 0.018 | 0.026 |
+| Gemma-3-1B | **0.136** | 0.142 | 0.144 | 0.149 |
+| Mistral-7B | 0.0012 | 0.002 | 0.005 | 0.006 |
 
-### Δ_⊥ fraction varies a lot in Gemma
+**Mistral's cosine is most immune to subspace removal** — even with rank-5 of the carrier projected off, cos sim moves <0.01. Gemma's cosine is most responsive — rank-1 removal already drops ~0.14, and higher ranks barely add. Qwen sits between: rank-1 doesn't move it, but rank-5 starts to (~0.03).
 
-Mean Δ_⊥ fraction in the band:
-- Qwen: 99.7% (consistently perpendicular)
-- Mistral: 99.3% (consistently perpendicular)
-- Gemma: **61.9%** (varies layer-to-layer; some layers are mostly carrier-aligned)
+Notable: the "sink-style → cosine immune to carrier removal" rule holds robustly across rank sweeps, sharpening the n=3 dichotomy from the prior writeup.
 
-Combined with Gemma's smaller cos band, this is consistent with Gemma's carrier being something more dynamic than a sink — layers actively read and write into the carrier direction in Gemma, while Qwen/Mistral mostly maintain it as infrastructure.
+## Where this puts us relative to Cancedda 2024
 
-## What this means
+Cancedda showed in LLaMa2 7B/13B/70B that:
+- The bottom 5% of W_unembed's right singular vectors form "U-dark"
+- BOS attention sinks correspond to large-norm vectors lying entirely in U-dark, generated in specific MLP layers (L3 for 7B/13B)
+- Sink-preserving spectral filters can suppress 25% of singular values with minimal NLL increase
 
-The original Qwen-only writeup framed three things:
-1. There is a single persistent carrier.
-2. It is the BOS attention sink.
-3. Removing it doesn't fix cosine.
+Our test on three other families shows:
+- The phenomenon **partially** generalizes to Qwen and Mistral. Their carriers are dark-aligned, but not "entirely in U-dark" the way Cancedda found for LLaMa2. Qwen's carrier puts 35% of energy in bottom-100 (= 6.5% of dimensions), whereas Cancedda's LLaMa2 sinks were essentially 100% in the bottom 5%. So Cancedda's framework applies in spirit but the carriers are noisier / more spread on Qwen.
+- The phenomenon **does not** generalize to Gemma. Gemma's carrier is in the bright subspace, opposite to U-dark.
 
-After cross-model: only (1) is universal. (2) is sink-or-not depending on family. (3) is a *consequence* of (2) — when the carrier is the sink, both raw and carrier-removed cosine are dominated by structure that persists per-token; when it isn't, carrier-removed cosine reveals more.
+**Our potentially-new contribution after Cancedda:**
+1. **Cross-family extension**: Cancedda's mechanism partially holds beyond LLaMa2. Qwen and Mistral confirm at weaker strengths.
+2. **Counterexample (Gemma)**: an existing dense transformer with persistent low-rank carrier that is *not* a dark-signal sink. Its carrier is bright-aligned and unflattens adjacent-layer cosine when removed. This is genuinely outside Cancedda's framework.
+3. **Methodological connection**: the carrier-vs-cosine relationship (whether removing carrier exposes layer variation) tracks the dark/bright alignment, which connects two literatures that were previously separate (Cancedda's spectral sinks; Curse-of-Depth-style cosine-similarity layer analysis).
 
-The cleaner generalized claim:
+## What this isn't
 
-**Adjacent-layer cosine in the residual stream is dominated by a small, persistent carrier subspace, but the carrier's identity (sink-like vs. position-uniform) determines whether removing it exposes layer-to-layer variation. Variance-spectrum metrics (`d_eff_c` on activations and on Δ) reveal layer behavior that cosine does not, regardless of carrier identity.**
+- **Not** a layer-utility metric.
+- **Not** a "we found the right metric" claim. Multiple metrics (d_eff, cos sim, dark alignment, position localization) each capture a different aspect.
+- **Not** universal generalization. n=3 across three families on Apple Silicon. No Llama, no Phi, no MoE, no hybrid.
+- **Not** a BOS test. Our setup explicitly omits BOS (`add_special_tokens=False`); we report position-0-localization, which is *similar to* but not identical to a BOS sink in token identity. Whether Qwen/Mistral position-0 sinks shift to a BOS token under a default tokenizer is untested.
+- **Not** a causal demonstration. We measure structure; we don't ablate the carrier and verify performance impact.
 
-That's the Muyu-facing claim now. Less elegant than the original n=1 sound bite, but more honest and more interesting.
+## Outstanding questions worth flagging
+
+1. **What is Gemma's carrier doing?** Bright-aligned, position-uniform, persistent across 16 layers. Different mechanism from Cancedda's sinks. We have no story for what it computes.
+2. **BOS-included rerun.** Re-run the same three models with `add_special_tokens=True` to see whether the position-0 sink moves to BOS token explicitly. ~10 min compute, no new code.
+3. **Mistral's rank-2 dark alignment.** We measured rank-1 carrier vs unembedding tail. Mistral's carrier is rank-2 (top-2 explains 89%). The second carrier direction may be more strongly dark.
+4. **CKA comparison.** Standard layer-similarity baseline. Would tell us whether CKA already discounts the carrier (in which case our carrier-removed cos sim is "CKA's lite version") or not (in which case we have something new).
+5. **Causal ablation.** Forward-pass intervention removing the carrier subspace, with PPL / NLL evaluation. This is the gold-standard test for "is the carrier load-bearing." Multi-hour, more involved.
+6. **Llama-3.2-1B.** Cancedda used LLaMa2; LLaMa3 family has different training. Free run if it loads.
+
+## Where this could go (not committed)
+
+- Read Cancedda end-to-end (we have the abstract + key claims via webfetch but not the full mechanistic detail).
+- Implement CKA comparison as a separate analysis script reading the saved hidden states.
+- Implement causal ablation as a separate test (Qwen most likely target; sink is most extreme there).
+- BOS-included rerun on Qwen and Mistral.
+- Extend to one more dense family (Llama).
 
 ## Figures
 
@@ -113,43 +136,9 @@ For each model, five figures (`docs/img/carrier_*_<model>.png`):
 - `carrier_persistence_*` — cross-layer top-PC alignment heatmap
 - `carrier_recovery_*` — `d_eff_c` per layer at original and carrier-removed-rank-{1,2,3,5,10,20}
 - `carrier_decomposition_*` — per-transition Δ_∥/Δ_⊥ fractions and `d_eff_c(Δ_⊥)`
-- `carrier_cosine_comparison_*` — raw vs carrier-removed cos sim per transition
+- `carrier_cosine_comparison_*` — multi-rank carrier-removed cos sim per transition (raw + k ∈ {1, 2, 3, 5})
 - `carrier_position_localization_*` — per-position carrier coefficient
-
-The Gemma cosine figure is the most striking visual artifact — gray (raw) and red (carrier-removed) curves separate by 0.1–0.3 across most middle transitions, in contrast to the perfectly overlapping curves on Qwen and Mistral.
-
-## Limits
-
-1. **n=3 across three families.** Real but not universal. Llama, Phi, hybrids untested.
-2. **Cosine-removal test is rank-1 only.** Mistral's carrier is rank-2; we did not test rank-2 cosine removal on Mistral, which might unflatten it. Outstanding question: would removing the full carrier *subspace* (not just top-1) unflatten cosine even on sink-style models?
-3. **Sample size 4096 positions.** Stable for spectrum-level claims; fine for the BOS spike (which is dramatic at any reasonable sample size). Less stable for fine position-distribution claims in the non-sink case (Gemma).
-4. **fp32 forward.** All three models. Rules out fp16-precision artifacts.
-5. **Wikitext only.** Domain effects untested.
-6. **Position-localization heuristic.** "max/median ratio > 100" is a clean separation between the sink (Qwen 5000, Mistral 250–1000) and non-sink (Gemma 1.5–1.7) cases on this sample. Not claimed as a general taxonomy.
-
-## What the cross-model picture clarifies and what it doesn't
-
-**Clarifies:**
-- The carrier phenomenon is a robust property of dense transformers in this size range, not a Qwen quirk.
-- Sink-style and non-sink-style carriers exist in the wild within standard architectures.
-- The cosine-confound has two regimes, not one.
-
-**Doesn't clarify:**
-- *Why* Gemma's carrier is non-sink while Mistral's and Qwen's are sinks. Could be training data, attention bias initialization, instruction-tuning, head architecture. Not investigated.
-- Whether the rank-2 carrier in Mistral is two sinks, a sink + something, or two something-elses. We have the position-localization at rank-1 (BOS-dominated); we did not check rank-2's position pattern.
-- What the perpendicular subspace actually encodes. We measured its complexity (`d_eff_c(Δ_⊥)`), not its content.
-- Whether this generalizes to MoE, hybrid, vision-language, or 30B+ models.
-
-## Suggested follow-ups (not committed)
-
-1. **Rank-k cosine removal on Mistral.** Quick re-run, ~5 min — does removing rank-2 of the carrier subspace unflatten cosine? If yes, Mistral re-categorizes alongside Gemma after sufficient subspace removal. If no, the Qwen/Mistral pattern is intrinsically immune to subspace subtraction.
-2. **Look at rank-2 position-localization on Mistral.** What is the second carrier direction? Another sink at a different position? An auxiliary feature?
-3. **Investigate why Gemma's carrier is non-sink.** Compare attention patterns at L11 and L15 between Gemma and Qwen on the same input.
-4. **Add Llama-3.2-1B.** Fourth family; would tell us if the sink/non-sink split is Mistral-vs-Gemma vs. universal.
-5. **Hybrid models.** Already deferred; CUDA dependency is the blocker.
 
 ## Adjacency
 
-This work uses the same toolkit as the K/V asymmetry memo (`docs/kv_asymmetry_memo.md`) but operates on a different object (residual-stream activations, not K/V tensors). The methodological reuse is the only link. The cross-model story here is independent of any compression conclusions.
-
-The original Qwen-deep-dive (`docs/layer_structure_carrier_test.md`) remains the place to look for detailed mechanism and L2-anomaly notes; this document is the breadth pass.
+This work uses the same toolkit as the K/V asymmetry memo (`docs/kv_asymmetry_memo.md`) but operates on a different object (residual-stream activations, not K/V tensors). The methodological reuse is the only link.

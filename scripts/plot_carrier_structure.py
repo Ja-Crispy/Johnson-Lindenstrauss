@@ -149,24 +149,36 @@ def fig_cosine(d: dict, out_dir: Path, suffix: str = "") -> None:
     c = d["cosine_comparison"]
     t = [r["layer_from"] + 0.5 for r in c]
     cos_raw = [r["cos_raw"] for r in c]
-    cos_perp = [r["cos_perp"] for r in c]
+
+    # Detect available ranks
+    ranks = []
+    for k in [1, 2, 3, 5]:
+        if all(f"cos_perp_k{k}" in r for r in c):
+            ranks.append(k)
+    if not ranks and "cos_perp" in c[0]:
+        ranks = [1]
+        for r in c:
+            r["cos_perp_k1"] = r["cos_perp"]
 
     fig, ax = plt.subplots(figsize=(11, 5.5))
     ax.plot(t, cos_raw, "o-", color="tab:gray", lw=2, ms=5,
             label="raw cos(h_l, h_{l+1})")
-    ax.plot(t, cos_perp, "s-", color="tab:red", lw=2, ms=5,
-            label="cos(h_l_⊥, h_{l+1}_⊥) — carrier removed (rank-1)")
+
+    palette = plt.cm.Reds(np.linspace(0.4, 0.9, len(ranks)))
+    for color, k in zip(palette, ranks):
+        cos_k = [r[f"cos_perp_k{k}"] for r in c]
+        ax.plot(t, cos_k, "s-", color=color, lw=1.8, ms=4,
+                label=f"carrier removed, k={k}")
     ax.set_xlabel("Layer transition l → l+1")
     ax.set_ylabel("cosine similarity")
     ax.set_ylim(-0.1, 1.05)
     ax.grid(alpha=0.3)
     ax.axhline(1.0, color="gray", linestyle=":", alpha=0.3)
     ax.axhline(0.0, color="gray", linestyle=":", alpha=0.3)
-    ax.legend(loc="lower left", fontsize=11)
+    ax.legend(loc="lower left", fontsize=10)
     ax.set_title(
-        f"Step 5: Carrier-removed cosine vs raw cosine ({d['model']})\n"
-        "If raw cos sits in a narrow band but carrier-removed cos varies, "
-        "cos sim was tracking carrier persistence, not layer behavior."
+        f"Step 5: Carrier-removed cosine across ranks ({d['model']})\n"
+        "Raw cos vs cos with top-k carrier dimensions projected off."
     )
     plt.tight_layout()
     out = out_dir / f"carrier_cosine_comparison{suffix}.png"

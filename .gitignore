@@ -4,3 +4,8 @@ turbo-diag-*.txt
 turbo-monitor-*.csv
 context.rtf
 neural kv compression.rtfd/
+
+# Carrier-test analyzer NPZ archives are regenerable from the JSON +
+# scripts/analyze_carrier_structure.py. They contain saved hidden states
+# (~2 GB for Mistral) and bust GitHub's 100 MB per-file limit.
+results/carrier_structure_*.npz
