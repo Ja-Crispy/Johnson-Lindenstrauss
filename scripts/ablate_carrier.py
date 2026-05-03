@@ -143,6 +143,45 @@ def make_swap_hook(c: torch.Tensor, r: torch.Tensor):
     return hook
 
 
+def make_noop_hook():
+    """Sanity check: hook that returns the input unchanged.
+
+    Verifies the hook machinery itself isn't perturbing the residual stream
+    via dtype casts, contiguity changes, etc. PPL should match no-hook baseline.
+    """
+    def hook(module, inputs, output):
+        return output
+    return hook
+
+
+def make_norm_restored_hook(direction: torch.Tensor):
+    """Project off `direction`, then rescale per-position to match original ||h||.
+
+    Disambiguates "model needed the carrier signal" from "model needed the
+    correct ||h|| fed to the next layer's RMSNorm". If norm-restored ablation
+    is just as catastrophic as plain ablation, the failure is about the
+    direction's information; if it's much milder, the failure was norm-driven.
+    """
+    def hook(module, inputs, output):
+        if isinstance(output, tuple):
+            h = output[0]
+            rest = output[1:]
+        else:
+            h = output
+            rest = None
+        d = direction.to(h.device).to(h.dtype)
+        proj = (h * d).sum(dim=-1, keepdim=True)
+        h_perp = h - proj * d
+        # Per-position norms
+        orig_norm = h.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        new_norm = h_perp.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        h_new = h_perp * (orig_norm / new_norm)
+        if rest is None:
+            return h_new
+        return (h_new,) + rest
+    return hook
+
+
 # ---------------------------------------------------------------------------
 # Eval
 # ---------------------------------------------------------------------------
@@ -232,6 +271,11 @@ def main() -> None:
                     default="mps" if torch.backends.mps.is_available() else "cpu")
     ap.add_argument("--dtype", default="fp32", choices=["fp32", "fp16"])
     ap.add_argument("--output", required=True)
+    ap.add_argument(
+        "--with-sanity",
+        action="store_true",
+        help="Also run hook_noop (sanity check) and norm_restored conditions.",
+    )
     args = ap.parse_args()
 
     target_layers = [int(s) for s in args.target_layers.split(",")]
@@ -312,16 +356,21 @@ def main() -> None:
             sr = run_condition(model, target, hook, token_ids, device,
                                f"random_remove_seed{seed}")
             random_remove_runs.append(sr["ppl"])
+        rr = np.array(random_remove_runs)
         agg = {
             "condition": "random_remove",
             "target_layer": target,
-            "ppl_mean": float(np.mean(random_remove_runs)),
-            "ppl_std": float(np.std(random_remove_runs)),
+            "ppl_mean": float(rr.mean()),
+            "ppl_median": float(np.median(rr)),
+            "ppl_std": float(rr.std()),
+            "ppl_p25": float(np.percentile(rr, 25)),
+            "ppl_p75": float(np.percentile(rr, 75)),
             "n_seeds": args.n_random_seeds,
             "per_seed_ppl": random_remove_runs,
         }
-        print(f"  random_remove (n={args.n_random_seeds}) PPL={agg['ppl_mean']:.4f} "
-              f"± {agg['ppl_std']:.4f}  ΔPPL={agg['ppl_mean']/base['ppl']:.2f}×")
+        print(f"  random_remove (n={args.n_random_seeds}) "
+              f"median={agg['ppl_median']:.4f}  IQR=[{agg['ppl_p25']:.2f}, {agg['ppl_p75']:.2f}]  "
+              f"ΔPPL={agg['ppl_median']/base['ppl']:.2f}× (median)")
         results.append(agg)
 
         # 4. direction_swap (averaged over seeds, r ⊥ c_uncentered)
@@ -333,16 +382,21 @@ def main() -> None:
             sr = run_condition(model, target, hook, token_ids, device,
                                f"direction_swap_seed{seed}")
             swap_runs.append(sr["ppl"])
+        sr = np.array(swap_runs)
         agg = {
             "condition": "direction_swap",
             "target_layer": target,
-            "ppl_mean": float(np.mean(swap_runs)),
-            "ppl_std": float(np.std(swap_runs)),
+            "ppl_mean": float(sr.mean()),
+            "ppl_median": float(np.median(sr)),
+            "ppl_std": float(sr.std()),
+            "ppl_p25": float(np.percentile(sr, 25)),
+            "ppl_p75": float(np.percentile(sr, 75)),
             "n_seeds": args.n_random_seeds,
             "per_seed_ppl": swap_runs,
         }
-        print(f"  direction_swap (n={args.n_random_seeds}) PPL={agg['ppl_mean']:.4f} "
-              f"± {agg['ppl_std']:.4f}  ΔPPL={agg['ppl_mean']/base['ppl']:.2f}×")
+        print(f"  direction_swap (n={args.n_random_seeds}) "
+              f"median={agg['ppl_median']:.4f}  IQR=[{agg['ppl_p25']:.2f}, {agg['ppl_p75']:.2f}]  "
+              f"ΔPPL={agg['ppl_median']/base['ppl']:.2f}× (median)")
         results.append(agg)
 
         # 5. centered_remove
@@ -350,6 +404,19 @@ def main() -> None:
         s = run_condition(model, target, hook, token_ids, device, "centered_remove")
         print(f"  centered_remove       PPL={s['ppl']:.4f}  ΔPPL={s['ppl']/base['ppl']:.2f}×")
         results.append(s)
+
+        # 6. hook_noop (sanity: hook machinery should not change PPL)
+        if args.with_sanity:
+            hook = make_noop_hook()
+            s = run_condition(model, target, hook, token_ids, device, "hook_noop")
+            print(f"  hook_noop (sanity)    PPL={s['ppl']:.4f}  ΔPPL={s['ppl']/base['ppl']:.4f}×")
+            results.append(s)
+
+            # 7. norm_restored: project off carrier, rescale to original ||h||
+            hook = make_norm_restored_hook(c_uc_t)
+            s = run_condition(model, target, hook, token_ids, device, "norm_restored")
+            print(f"  norm_restored         PPL={s['ppl']:.4f}  ΔPPL={s['ppl']/base['ppl']:.2f}×")
+            results.append(s)
 
         if args.device == "mps":
             try:
